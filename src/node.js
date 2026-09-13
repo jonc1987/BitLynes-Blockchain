@@ -1,5 +1,6 @@
 import express from "express";
 import path from "node:path";
+import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { BitLynesChain } from "./blockchain.js";
 import { generateWallet } from "./crypto.js";
@@ -28,6 +29,7 @@ const autoMine = {
   lastBlock: null,
   lastError: null,
   busy: false,
+  lastCheckAt: 0,
 };
 
 function persist() {
@@ -102,7 +104,17 @@ function accountActivity(address) {
 }
 
 setInterval(() => {
-  if (!autoMine.enabled || autoMine.busy || chain.mempool.length === 0) {
+  if (!autoMine.enabled || autoMine.busy) {
+    return;
+  }
+
+  const now = Date.now();
+  if (now - autoMine.lastCheckAt < autoMine.intervalMs) {
+    return;
+  }
+  autoMine.lastCheckAt = now;
+
+  if (chain.mempool.length === 0) {
     return;
   }
 
@@ -137,6 +149,16 @@ setInterval(() => {
 
 const app = express();
 app.use(express.json({ limit: "64kb" }));
+
+const dashboardPath = path.join(__dirname, "..", "public", "index.html");
+const dashboardRoutes = new Set(["/", "/miner", "/account", "/add-funds"]);
+app.get([...dashboardRoutes], (req, res) => {
+  const html = fs
+    .readFileSync(dashboardPath, "utf8")
+    .replace("</body>", '<script src="/automine.js"></script></body>');
+  res.type("html").send(html);
+});
+
 app.use(express.static(path.join(__dirname, "..", "public")));
 
 app.get("/api/info", (req, res) => {
