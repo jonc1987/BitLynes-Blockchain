@@ -225,8 +225,27 @@ export class BitLynesChain {
     let remaining;
 
     if (minerGroupId) {
-      selected = this.mempool.filter((tx) => (tx.minerGroupId ?? "legacy") === minerGroupId);
-      remaining = this.mempool.filter((tx) => (tx.minerGroupId ?? "legacy") !== minerGroupId);
+      const nextNonce = new Map();
+      selected = [];
+
+      for (const tx of this.mempool) {
+        const sender = tx.from;
+        const expected = nextNonce.get(sender) ?? (this.getConfirmedNonce(sender) + 1);
+
+        if (tx.nonce !== expected) {
+          continue;
+        }
+
+        if ((tx.minerGroupId ?? "legacy") !== minerGroupId) {
+          continue;
+        }
+
+        selected.push(tx);
+        nextNonce.set(sender, expected + 1);
+      }
+
+      const selectedIds = new Set(selected.map((tx) => tx.id));
+      remaining = this.mempool.filter((tx) => !selectedIds.has(tx.id));
     } else {
       selected = clone(this.mempool);
       remaining = [];
