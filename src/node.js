@@ -40,7 +40,7 @@ function accountActivity(address) {
   for (const block of chain.chain) {
     if (block.index > 0 && block.miner === address && (block.rewardUnits ?? 0) > 0) {
       activity.push({
-        type: block.faucet ? "faucet" : "mining",
+        type: block.rewardUnits === chain.rewardUnits ? "mining" : "faucet",
         amount: block.rewardUnits / 1e8,
         timestamp: block.timestamp,
         block: block.index,
@@ -177,9 +177,10 @@ app.post(
       throw new Error("Faucet amount is too large.");
     }
 
-    // Prototype-only faucet: make an empty auditable block whose reward is the
-    // requested test amount. Pending Lynes stay pending and the normal mining
-    // reward is restored immediately after the faucet block is created.
+    // Prototype-only faucet: mine an empty block whose reward is the requested
+    // test amount. Pending Lynes remain pending, and the normal mining reward is
+    // restored immediately afterward. The block itself is never altered after
+    // mining, so its proof-of-work hash remains valid.
     const pending = chain.mempool;
     const normalRewardUnits = chain.rewardUnits;
     chain.mempool = [];
@@ -188,10 +189,6 @@ app.post(
     let block;
     try {
       block = chain.minePending(address);
-      block.faucet = true;
-      chain.chain[chain.chain.length - 1].faucet = true;
-      chain.chain[chain.chain.length - 1].hash = chain.hashBlock(chain.chain[chain.chain.length - 1]);
-      block.hash = chain.chain[chain.chain.length - 1].hash;
     } finally {
       chain.rewardUnits = normalRewardUnits;
       chain.mempool = pending;
