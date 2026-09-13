@@ -8,11 +8,11 @@ import { JsonStore } from "./store.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 4242);
-const DATA_FILE =
-  process.env.BITLYNES_DATA ??
-  path.join(__dirname, "..", "data", "chain.json");
+const DATA_FILE = process.env.BITLYNES_DATA ?? path.join(__dirname, "..", "data", "chain.json");
+const MINERS_FILE = process.env.BITLYNES_MINERS ?? path.join(__dirname, "..", "data", "miners.json");
 
 const store = new JsonStore(DATA_FILE);
+const minersStore = new JsonStore(MINERS_FILE);
 const savedState = store.load();
 
 const chain = new BitLynesChain({
@@ -21,19 +21,36 @@ const chain = new BitLynesChain({
   state: savedState,
 });
 
-const autoMine = {
-  enabled: false,
-  minerAddress: null,
-  intervalMs: 2000,
-  lastMinedAt: null,
-  lastBlock: null,
-  lastError: null,
-  busy: false,
-  lastCheckAt: 0,
+const AUTOMINER_ID = "autominer";
+const AUTOMINER_FEE_PERCENT = 0.002;
+const AUTOMINER_PAYOUT = "LYN0000000000000000000000000000000000000000";
+
+let miners = minersStore.load() ?? {
+  version: 1,
+  groups: [],
 };
 
-function persist() {
+function ensureAutoMiner() {
+  miners.groups = miners.groups.filter((group) => group.id !== AUTOMINER_ID);
+  miners.groups.unshift({
+    id: AUTOMINER_ID,
+    name: "AutoMiner",
+    feePercent: AUTOMINER_FEE_PERCENT,
+    payoutAddress: AUTOMINER_PAYOUT,
+    system: true,
+    createdAt: 0,
+    description: "Always-on BitLynes network miner.",
+  });
+}
+ensureAutoMiner();
+minersStore.save(miners);
+
+function persistChain() {
   store.save(chain.exportState());
+}
+
+function persistMiners() {
+  minersStore.save(miners);
 }
 
 function asyncRoute(handler) {
@@ -46,16 +63,33 @@ function asyncRoute(handler) {
   };
 }
 
-function autoMineStatus() {
+function minerById(id) {
+  return miners.groups.find((group) => group.id === id) ?? null;
+}
+
+function minerPublic(group) {
   return {
-    enabled: autoMine.enabled,
-    minerAddress: autoMine.minerAddress,
-    intervalMs: autoMine.intervalMs,
-    lastMinedAt: autoMine.lastMinedAt,
-    lastBlock: autoMine.lastBlock,
-    lastError: autoMine.lastError,
-    busy: autoMine.busy,
+    id: group.id,
+    name: group.name,
+    feePercent: group.feePercent,
+    payoutAddress: group.payoutAddress,
+    system: Boolean(group.system),
+    createdAt: group.createdAt,
+    description: group.description ?? "",
+    queued: chain.mempool.filter((tx) => (tx.minerGroupId ?? "legacy") === group.id).length,
   };
+}
+
+function slugId(name) {
+  const base = String(name)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 32) || "miner";
+  let id = base;
+  let n = 2;
+  while (minerById(id)) id = `${base}-${n++}`;
+  return id;
 }
 
 function accountActivity(address) {
@@ -63,9 +97,14 @@ function accountActivity(address) {
 
   for (const block of chain.chain) {
     if (block.index > 0 && block.miner === address && (block.rewardUnits ?? 0) > 0) {
+      const baseReward = (block.rewardUnits ?? 0) / 1e8;
+      const fees = (block.feeUnits ?? 0) / 1e8;
       activity.push({
-        type: block.rewardUnits === chain.rewardUnits ? "mining" : "faucet",
-        amount: block.rewardUnits / 1e8,
+        type: block.minerGroupId === "faucet" ? "faucet" : "mining",
+        amount: baseReward + fees,
+        baseReward,
+        fees,
+        minerGroupName: block.minerGroupName ?? "Miner",
         timestamp: block.timestamp,
         block: block.index,
         hash: block.hash,
@@ -77,6 +116,8 @@ function accountActivity(address) {
         activity.push({
           type: tx.from === address ? "sent" : "received",
           amount: tx.amountUnits / 1e8,
+          fee: tx.from === address ? (tx.feeUnits ?? 0) / 1e8 : 0,
+          minerGroupId: tx.minerGroupId ?? "legacy",
           timestamp: tx.timestamp,
           block: block.index,
           id: tx.id,
@@ -92,6 +133,8 @@ function accountActivity(address) {
       activity.push({
         type: tx.from === address ? "pending-sent" : "pending-received",
         amount: tx.amountUnits / 1e8,
+        fee: tx.from === address ? (tx.feeUnits ?? 0) / 1e8 : 0,
+        minerGroupId: tx.minerGroupId ?? "legacy",
         timestamp: tx.timestamp,
         id: tx.id,
         from: tx.from,
@@ -104,61 +147,26 @@ function accountActivity(address) {
 }
 
 setInterval(() => {
-  if (!autoMine.enabled || autoMine.busy) {
-    return;
-  }
-
-  const now = Date.now();
-  if (now - autoMine.lastCheckAt < autoMine.intervalMs) {
-    return;
-  }
-  autoMine.lastCheckAt = now;
-
-  if (chain.mempool.length === 0) {
-    return;
-  }
-
-  if (!autoMine.minerAddress) {
-    autoMine.lastError = "AutoMine has no miner address.";
-    return;
-  }
-
-  autoMine.busy = true;
-  autoMine.lastError = null;
+  const autoMiner = minerById(AUTOMINER_ID);
+  const queued = chain.mempool.some((tx) => tx.minerGroupId === AUTOMINER_ID);
+  if (!autoMiner || !queued) return;
 
   try {
-    const block = chain.minePending(autoMine.minerAddress);
-    persist();
-    autoMine.lastMinedAt = Date.now();
-    autoMine.lastBlock = {
-      index: block.index,
-      hash: block.hash,
-      transactions: block.transactions.length,
-      reward: (block.rewardUnits ?? 0) / 1e8,
-    };
+    const block = chain.minePending(autoMiner.payoutAddress, {
+      minerGroupId: autoMiner.id,
+      minerGroupName: autoMiner.name,
+    });
+    persistChain();
     console.log(
-      `[AutoMine] Mined block ${block.index} with ${block.transactions.length} Lyne(s): ${block.hash}`
+      `[AutoMiner] block ${block.index} · ${block.transactions.length} Lyne(s) · fees ${(block.feeUnits ?? 0) / 1e8} LYN`
     );
   } catch (error) {
-    autoMine.lastError = error.message || String(error);
-    console.error("[AutoMine]", error);
-  } finally {
-    autoMine.busy = false;
+    console.error("[AutoMiner]", error);
   }
 }, 1000).unref();
 
 const app = express();
 app.use(express.json({ limit: "64kb" }));
-
-const dashboardPath = path.join(__dirname, "..", "public", "index.html");
-const dashboardRoutes = new Set(["/", "/miner", "/account", "/add-funds"]);
-app.get([...dashboardRoutes], (req, res) => {
-  const html = fs
-    .readFileSync(dashboardPath, "utf8")
-    .replace("</body>", '<script src="/automine.js"></script></body>');
-  res.type("html").send(html);
-});
-
 app.use(express.static(path.join(__dirname, "..", "public")));
 
 app.get("/api/info", (req, res) => {
@@ -172,16 +180,77 @@ app.get("/api/info", (req, res) => {
     difficulty: chain.difficulty,
     reward: chain.rewardUnits / 1e8,
     latestHash: chain.chain.at(-1).hash,
-    autoMine: autoMineStatus(),
+    miners: miners.groups.length,
   });
 });
 
-app.get("/api/chain", (req, res) => {
-  res.json(chain.chain);
+app.get("/api/chain", (req, res) => res.json(chain.chain));
+app.get("/api/lynes", (req, res) => res.json(chain.mempool));
+
+app.get("/api/miners", (req, res) => {
+  res.json(miners.groups.map(minerPublic));
 });
 
-app.get("/api/lynes", (req, res) => {
-  res.json(chain.mempool);
+app.post("/api/miners", (req, res) => {
+  const name = String(req.body?.name ?? "").trim();
+  const payoutAddress = String(req.body?.payoutAddress ?? "").trim();
+  const feePercent = Number(req.body?.feePercent);
+
+  if (name.length < 2 || name.length > 40) {
+    return res.status(400).json({ error: "Miner group name must be 2-40 characters." });
+  }
+  if (!payoutAddress.startsWith("LYN")) {
+    return res.status(400).json({ error: "A BitLynes payout address is required." });
+  }
+  if (!Number.isFinite(feePercent) || feePercent < 0 || feePercent > 10) {
+    return res.status(400).json({ error: "Miner fee must be between 0% and 10%." });
+  }
+
+  const group = {
+    id: slugId(name),
+    name,
+    payoutAddress,
+    feePercent: Math.round(feePercent * 1000000) / 1000000,
+    system: false,
+    createdAt: Date.now(),
+    description: String(req.body?.description ?? "").trim().slice(0, 120),
+  };
+
+  miners.groups.push(group);
+  persistMiners();
+  res.status(201).json(minerPublic(group));
+});
+
+app.delete("/api/miners/:id", (req, res) => {
+  const group = minerById(req.params.id);
+  if (!group) return res.status(404).json({ error: "Miner group not found." });
+  if (group.system) return res.status(400).json({ error: "AutoMiner cannot be deleted." });
+  if (chain.mempool.some((tx) => tx.minerGroupId === group.id)) {
+    return res.status(400).json({ error: "This miner still has queued Lynes." });
+  }
+  miners.groups = miners.groups.filter((item) => item.id !== group.id);
+  persistMiners();
+  res.json({ deleted: true, id: group.id });
+});
+
+app.post("/api/miners/:id/mine", (req, res) => {
+  const group = minerById(req.params.id);
+  if (!group) return res.status(404).json({ error: "Miner group not found." });
+  if (group.system) {
+    return res.status(400).json({ error: "AutoMiner runs automatically." });
+  }
+
+  const queued = chain.mempool.filter((tx) => tx.minerGroupId === group.id);
+  if (queued.length === 0) {
+    return res.status(400).json({ error: "This miner group has no queued Lynes." });
+  }
+
+  const block = chain.minePending(group.payoutAddress, {
+    minerGroupId: group.id,
+    minerGroupName: group.name,
+  });
+  persistChain();
+  res.status(201).json(block);
 });
 
 app.get("/api/balance/:address", (req, res) => {
@@ -205,60 +274,33 @@ app.get("/api/account/:address", (req, res) => {
   });
 });
 
-app.get("/api/automine", (req, res) => {
-  res.json(autoMineStatus());
-});
-
-app.post("/api/automine", (req, res) => {
-  const enabled = Boolean(req.body?.enabled);
-  const minerAddress = req.body?.minerAddress ?? autoMine.minerAddress;
-  const intervalMs = Number(req.body?.intervalMs ?? autoMine.intervalMs);
-
-  if (enabled && (!minerAddress || typeof minerAddress !== "string" || !minerAddress.startsWith("LYN"))) {
-    return res.status(400).json({ error: "A valid BitLynes miner address is required to enable AutoMine." });
-  }
-
-  if (!Number.isFinite(intervalMs) || intervalMs < 1000 || intervalMs > 60000) {
-    return res.status(400).json({ error: "AutoMine interval must be between 1 and 60 seconds." });
-  }
-
-  autoMine.enabled = enabled;
-  autoMine.minerAddress = minerAddress || null;
-  autoMine.intervalMs = Math.round(intervalMs);
-  autoMine.lastError = null;
-
-  res.json(autoMineStatus());
-});
-
 app.post("/api/wallet", (req, res) => {
   res.status(201).json({
     ...generateWallet(),
-    warning:
-      "Prototype wallet. The browser stores this key locally for convenience; do not use it for real money.",
+    warning: "Prototype wallet. This browser stores the private key locally; do not use it for real money.",
   });
 });
 
 app.post(
   "/api/lynes",
   asyncRoute(async (req, res) => {
-    const { privateKey, to, amount } = req.body ?? {};
+    const { privateKey, to, amount, minerGroupId } = req.body ?? {};
+    const miner = minerById(minerGroupId);
+    if (!miner) throw new Error("Choose a valid miner group.");
+
     const lyne = chain.createAndSubmitLyne({
       privateKey,
       to,
       amount: Number(amount),
+      minerGroupId: miner.id,
+      feePercent: miner.feePercent,
     });
-    persist();
-    res.status(201).json(lyne);
-  })
-);
+    persistChain();
 
-app.post(
-  "/api/mine",
-  asyncRoute(async (req, res) => {
-    const { minerAddress } = req.body ?? {};
-    const block = chain.minePending(minerAddress);
-    persist();
-    res.status(201).json(block);
+    res.status(201).json({
+      ...lyne,
+      miner: minerPublic(miner),
+    });
   })
 );
 
@@ -271,15 +313,12 @@ app.post(
     if (!address || typeof address !== "string" || !address.startsWith("LYN")) {
       throw new Error("A valid BitLynes address is required.");
     }
-
     if (!Number.isFinite(amount) || amount <= 0 || amount > 1_000_000) {
       throw new Error("Faucet amount must be between 0 and 1,000,000 LYN.");
     }
 
     const amountUnits = Math.round(amount * 1e8);
-    if (!Number.isSafeInteger(amountUnits)) {
-      throw new Error("Faucet amount is too large.");
-    }
+    if (!Number.isSafeInteger(amountUnits)) throw new Error("Faucet amount is too large.");
 
     const pending = chain.mempool;
     const normalRewardUnits = chain.rewardUnits;
@@ -288,13 +327,16 @@ app.post(
 
     let block;
     try {
-      block = chain.minePending(address);
+      block = chain.minePending(address, {
+        minerGroupId: "faucet",
+        minerGroupName: "Test Faucet",
+      });
     } finally {
       chain.rewardUnits = normalRewardUnits;
       chain.mempool = pending;
     }
 
-    persist();
+    persistChain();
     res.status(201).json({
       address,
       amount: amountUnits / 1e8,
@@ -305,30 +347,23 @@ app.post(
   })
 );
 
-app.get("/api/validate", (req, res) => {
-  res.json(chain.validateChain());
-});
+app.get("/api/validate", (req, res) => res.json(chain.validateChain()));
 
 app.use((req, res, next) => {
-  if (req.method !== "GET") {
-    return next();
-  }
-
+  if (req.method !== "GET") return next();
   if (req.path.startsWith("/api/")) {
     return res.status(404).json({ error: "BitLynes API route not found." });
   }
-
   return res.sendFile(path.join(__dirname, "..", "public", "index.html"));
 });
 
 app.use((error, req, res, next) => {
   console.error(error);
-  res.status(400).json({
-    error: error.message || "BitLynes request failed.",
-  });
+  res.status(400).json({ error: error.message || "BitLynes request failed." });
 });
 
 app.listen(PORT, () => {
   console.log(`BitLynes node listening on http://localhost:${PORT}`);
   console.log(`Chain data: ${DATA_FILE}`);
+  console.log(`Miner groups: ${MINERS_FILE}`);
 });
