@@ -34,6 +34,51 @@ function asyncRoute(handler) {
   };
 }
 
+function accountActivity(address) {
+  const activity = [];
+
+  for (const block of chain.chain) {
+    if (block.index > 0 && block.miner === address && (block.rewardUnits ?? 0) > 0) {
+      activity.push({
+        type: block.faucet ? "faucet" : "mining",
+        amount: block.rewardUnits / 1e8,
+        timestamp: block.timestamp,
+        block: block.index,
+        hash: block.hash,
+      });
+    }
+
+    for (const tx of block.transactions) {
+      if (tx.from === address || tx.to === address) {
+        activity.push({
+          type: tx.from === address ? "sent" : "received",
+          amount: tx.amountUnits / 1e8,
+          timestamp: tx.timestamp,
+          block: block.index,
+          id: tx.id,
+          from: tx.from,
+          to: tx.to,
+        });
+      }
+    }
+  }
+
+  for (const tx of chain.mempool) {
+    if (tx.from === address || tx.to === address) {
+      activity.push({
+        type: tx.from === address ? "pending-sent" : "pending-received",
+        amount: tx.amountUnits / 1e8,
+        timestamp: tx.timestamp,
+        id: tx.id,
+        from: tx.from,
+        to: tx.to,
+      });
+    }
+  }
+
+  return activity.sort((a, b) => b.timestamp - a.timestamp);
+}
+
 const app = express();
 app.use(express.json({ limit: "64kb" }));
 app.use(express.static(path.join(__dirname, "..", "public")));
@@ -42,6 +87,8 @@ app.get("/api/info", (req, res) => {
   res.json({
     name: "BitLynes",
     symbol: "LYN",
+    network: "prototype",
+    hasMarketValue: false,
     height: chain.chain.length - 1,
     pendingLynes: chain.mempool.length,
     difficulty: chain.difficulty,
@@ -68,11 +115,22 @@ app.get("/api/balance/:address", (req, res) => {
   });
 });
 
+app.get("/api/account/:address", (req, res) => {
+  const { address } = req.params;
+  res.json({
+    address,
+    confirmed: chain.getBalance(address),
+    available: chain.getBalance(address, { includeMempool: true }),
+    nextNonce: chain.getNextNonce(address),
+    activity: accountActivity(address),
+  });
+});
+
 app.post("/api/wallet", (req, res) => {
   res.status(201).json({
     ...generateWallet(),
     warning:
-      "Demo wallet. Store the private key safely. Production wallets should sign locally.",
+      "Prototype wallet. The browser stores this key locally for convenience; do not use it for real money.",
   });
 });
 
@@ -97,6 +155,56 @@ app.post(
     const block = chain.minePending(minerAddress);
     persist();
     res.status(201).json(block);
+  })
+);
+
+app.post(
+  "/api/faucet",
+  asyncRoute(async (req, res) => {
+    const { address } = req.body ?? {};
+    const amount = Number(req.body?.amount ?? 100);
+
+    if (!address || typeof address !== "string" || !address.startsWith("LYN")) {
+      throw new Error("A valid BitLynes address is required.");
+    }
+
+    if (!Number.isFinite(amount) || amount <= 0 || amount > 1_000_000) {
+      throw new Error("Faucet amount must be between 0 and 1,000,000 LYN.");
+    }
+
+    const amountUnits = Math.round(amount * 1e8);
+    if (!Number.isSafeInteger(amountUnits)) {
+      throw new Error("Faucet amount is too large.");
+    }
+
+    // Prototype-only faucet: make an empty auditable block whose reward is the
+    // requested test amount. Pending Lynes stay pending and the normal mining
+    // reward is restored immediately after the faucet block is created.
+    const pending = chain.mempool;
+    const normalRewardUnits = chain.rewardUnits;
+    chain.mempool = [];
+    chain.rewardUnits = amountUnits;
+
+    let block;
+    try {
+      block = chain.minePending(address);
+      block.faucet = true;
+      chain.chain[chain.chain.length - 1].faucet = true;
+      chain.chain[chain.chain.length - 1].hash = chain.hashBlock(chain.chain[chain.chain.length - 1]);
+      block.hash = chain.chain[chain.chain.length - 1].hash;
+    } finally {
+      chain.rewardUnits = normalRewardUnits;
+      chain.mempool = pending;
+    }
+
+    persist();
+    res.status(201).json({
+      address,
+      amount: amountUnits / 1e8,
+      balance: chain.getBalance(address),
+      block,
+      note: "Prototype-only LYN faucet. LYN has no assigned market value.",
+    });
   })
 );
 
