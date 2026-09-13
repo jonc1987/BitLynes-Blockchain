@@ -1,0 +1,23 @@
+{
+  "name": "bitlynes",
+  "version": "0.1.0",
+  "description": "BitLynes: create a signed Lyne of value and send it across a simple blockchain.",
+  "type": "module",
+  "main": "src/node.js",
+  "scripts": {
+    "start": "node src/node.js",
+    "dev": "node --watch src/node.js",
+    "test": "node --test",
+    "wallet": "node src/cli.js wallet",
+    "balance": "node src/cli.js balance",
+    "mine": "node src/cli.js mine",
+    "send": "node src/cli.js send",
+    "chain": "node src/cli.js chain"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}

@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BitLynes</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #070a12;
+      color: #f4f7ff;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 15% 15%, rgba(57, 130, 255, .22), transparent 32rem),
+        radial-gradient(circle at 85% 20%, rgba(149, 68, 255, .18), transparent 30rem),
+        #070a12;
+    }
+
+    .wrap {
+      width: min(1100px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 48px 0 80px;
+    }
+
+    .hero {
+      display: grid;
+      gap: 12px;
+      margin-bottom: 28px;
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 850;
+      font-size: clamp(34px, 7vw, 70px);
+      letter-spacing: -0.055em;
+    }
+
+    .brand span {
+      background: linear-gradient(90deg, #5ec7ff, #8a77ff, #f25dff);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+
+    .subtitle {
+      max-width: 760px;
+      color: #aab5ca;
+      font-size: 18px;
+      line-height: 1.6;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 16px;
+    }
+
+    .card {
+      grid-column: span 4;
+      background: rgba(13, 18, 31, .78);
+      border: 1px solid rgba(255,255,255,.09);
+      border-radius: 22px;
+      padding: 22px;
+      box-shadow: 0 24px 80px rgba(0,0,0,.18);
+      backdrop-filter: blur(18px);
+    }
+
+    .card.wide { grid-column: span 6; }
+
+    h2, h3 { margin-top: 0; }
+
+    .stat {
+      font-size: 34px;
+      font-weight: 800;
+      margin-top: 8px;
+      letter-spacing: -0.04em;
+    }
+
+    .muted { color: #8996ad; }
+
+    label {
+      display: block;
+      margin: 14px 0 7px;
+      color: #b9c3d5;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    input, textarea {
+      width: 100%;
+      padding: 12px 13px;
+      border: 1px solid rgba(255,255,255,.11);
+      border-radius: 12px;
+      background: #0a0f1c;
+      color: white;
+      outline: none;
+    }
+
+    textarea { min-height: 82px; resize: vertical; }
+
+    input:focus, textarea:focus {
+      border-color: #6ca9ff;
+      box-shadow: 0 0 0 3px rgba(79, 151, 255, .12);
+    }
+
+    button {
+      border: 0;
+      border-radius: 12px;
+      padding: 11px 16px;
+      margin-top: 14px;
+      cursor: pointer;
+      font-weight: 800;
+      color: #07101e;
+      background: linear-gradient(90deg, #66d1ff, #9b83ff);
+    }
+
+    button.secondary {
+      color: #eaf0ff;
+      background: #182033;
+      border: 1px solid rgba(255,255,255,.09);
+    }
+
+    pre {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      background: #060914;
+      border: 1px solid rgba(255,255,255,.07);
+      padding: 14px;
+      border-radius: 14px;
+      max-height: 290px;
+      overflow: auto;
+      color: #b9c8e7;
+    }
+
+    .tag {
+      display: inline-flex;
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: rgba(97, 155, 255, .12);
+      border: 1px solid rgba(97, 155, 255, .2);
+      color: #9ec4ff;
+      font-weight: 700;
+      font-size: 12px;
+    }
+
+    @media (max-width: 850px) {
+      .card, .card.wide { grid-column: 1 / -1; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="hero">
+      <div class="tag">BITLYNES TEST NETWORK</div>
+      <div class="brand">Bit<span>Lynes</span></div>
+      <div class="subtitle">
+        Create a Lyne of value, sign it, send it, and permanently add it to the BitLynes blockchain.
+        Native currency: <strong>LYN</strong>.
+      </div>
+    </section>
+
+    <section class="grid">
+      <article class="card">
+        <div class="muted">Block height</div>
+        <div id="height" class="stat">—</div>
+      </article>
+      <article class="card">
+        <div class="muted">Pending Lynes</div>
+        <div id="pending" class="stat">—</div>
+      </article>
+      <article class="card">
+        <div class="muted">Mining reward</div>
+        <div id="reward" class="stat">—</div>
+      </article>
+
+      <article class="card wide">
+        <h2>Create wallet</h2>
+        <p class="muted">For demo/testing only. Save your private key somewhere safe.</p>
+        <button id="walletBtn">Create BitLynes wallet</button>
+        <pre id="walletOut">No wallet created yet.</pre>
+      </article>
+
+      <article class="card wide">
+        <h2>Mine a block</h2>
+        <label>Miner address</label>
+        <input id="miner" placeholder="LYN..." />
+        <button id="mineBtn">Mine pending Lynes</button>
+        <pre id="mineOut">Mining output will appear here.</pre>
+      </article>
+
+      <article class="card wide">
+        <h2>Create a Lyne</h2>
+        <label>Sender private key</label>
+        <textarea id="privateKey" placeholder="PKCS8 DER base64"></textarea>
+        <label>Recipient address</label>
+        <input id="to" placeholder="LYN..." />
+        <label>Amount (LYN)</label>
+        <input id="amount" type="number" min="0.00000001" step="0.00000001" value="1" />
+        <button id="sendBtn">Create + send Lyne</button>
+        <pre id="sendOut">Your signed Lyne will appear here.</pre>
+      </article>
+
+      <article class="card wide">
+        <h2>Check balance</h2>
+        <label>Address</label>
+        <input id="balanceAddress" placeholder="LYN..." />
+        <button id="balanceBtn" class="secondary">Check balance</button>
+        <pre id="balanceOut">Balance output will appear here.</pre>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const pretty = (value) => JSON.stringify(value, null, 2);
+
+    async function api(url, options) {
+      const response = await fetch(url, options);
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "Request failed");
+      return body;
+    }
+
+    async function refresh() {
+      const info = await api("/api/info");
+      document.querySelector("#height").textContent = info.height;
+      document.querySelector("#pending").textContent = info.pendingLynes;
+      document.querySelector("#reward").textContent = `${info.reward} LYN`;
+    }
+
+    document.querySelector("#walletBtn").onclick = async () => {
+      const out = document.querySelector("#walletOut");
+      try {
+        const wallet = await api("/api/wallet", { method: "POST" });
+        out.textContent = pretty(wallet);
+        document.querySelector("#miner").value = wallet.address;
+        document.querySelector("#balanceAddress").value = wallet.address;
+        document.querySelector("#privateKey").value = wallet.privateKey;
+      } catch (error) {
+        out.textContent = error.message;
+      }
+    };
+
+    document.querySelector("#mineBtn").onclick = async () => {
+      const out = document.querySelector("#mineOut");
+      out.textContent = "Mining...";
+      try {
+        const block = await api("/api/mine", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            minerAddress: document.querySelector("#miner").value.trim(),
+          }),
+        });
+        out.textContent = pretty(block);
+        await refresh();
+      } catch (error) {
+        out.textContent = error.message;
+      }
+    };
+
+    document.querySelector("#sendBtn").onclick = async () => {
+      const out = document.querySelector("#sendOut");
+      try {
+        const lyne = await api("/api/lynes", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            privateKey: document.querySelector("#privateKey").value.trim(),
+            to: document.querySelector("#to").value.trim(),
+            amount: Number(document.querySelector("#amount").value),
+          }),
+        });
+        out.textContent = pretty(lyne);
+        await refresh();
+      } catch (error) {
+        out.textContent = error.message;
+      }
+    };
+
+    document.querySelector("#balanceBtn").onclick = async () => {
+      const out = document.querySelector("#balanceOut");
+      try {
+        const address = document.querySelector("#balanceAddress").value.trim();
+        out.textContent = pretty(await api(`/api/balance/${encodeURIComponent(address)}`));
+      } catch (error) {
+        out.textContent = error.message;
+      }
+    };
+
+    refresh().catch(console.error);
+  </script>
+</body>
+</html>
