@@ -20,6 +20,16 @@ const chain = new BitLynesChain({
   state: savedState,
 });
 
+const autoMine = {
+  enabled: false,
+  minerAddress: null,
+  intervalMs: 2000,
+  lastMinedAt: null,
+  lastBlock: null,
+  lastError: null,
+  busy: false,
+};
+
 function persist() {
   store.save(chain.exportState());
 }
@@ -31,6 +41,18 @@ function asyncRoute(handler) {
     } catch (error) {
       next(error);
     }
+  };
+}
+
+function autoMineStatus() {
+  return {
+    enabled: autoMine.enabled,
+    minerAddress: autoMine.minerAddress,
+    intervalMs: autoMine.intervalMs,
+    lastMinedAt: autoMine.lastMinedAt,
+    lastBlock: autoMine.lastBlock,
+    lastError: autoMine.lastError,
+    busy: autoMine.busy,
   };
 }
 
@@ -79,6 +101,40 @@ function accountActivity(address) {
   return activity.sort((a, b) => b.timestamp - a.timestamp);
 }
 
+setInterval(() => {
+  if (!autoMine.enabled || autoMine.busy || chain.mempool.length === 0) {
+    return;
+  }
+
+  if (!autoMine.minerAddress) {
+    autoMine.lastError = "AutoMine has no miner address.";
+    return;
+  }
+
+  autoMine.busy = true;
+  autoMine.lastError = null;
+
+  try {
+    const block = chain.minePending(autoMine.minerAddress);
+    persist();
+    autoMine.lastMinedAt = Date.now();
+    autoMine.lastBlock = {
+      index: block.index,
+      hash: block.hash,
+      transactions: block.transactions.length,
+      reward: (block.rewardUnits ?? 0) / 1e8,
+    };
+    console.log(
+      `[AutoMine] Mined block ${block.index} with ${block.transactions.length} Lyne(s): ${block.hash}`
+    );
+  } catch (error) {
+    autoMine.lastError = error.message || String(error);
+    console.error("[AutoMine]", error);
+  } finally {
+    autoMine.busy = false;
+  }
+}, 1000).unref();
+
 const app = express();
 app.use(express.json({ limit: "64kb" }));
 app.use(express.static(path.join(__dirname, "..", "public")));
@@ -94,6 +150,7 @@ app.get("/api/info", (req, res) => {
     difficulty: chain.difficulty,
     reward: chain.rewardUnits / 1e8,
     latestHash: chain.chain.at(-1).hash,
+    autoMine: autoMineStatus(),
   });
 });
 
@@ -124,6 +181,31 @@ app.get("/api/account/:address", (req, res) => {
     nextNonce: chain.getNextNonce(address),
     activity: accountActivity(address),
   });
+});
+
+app.get("/api/automine", (req, res) => {
+  res.json(autoMineStatus());
+});
+
+app.post("/api/automine", (req, res) => {
+  const enabled = Boolean(req.body?.enabled);
+  const minerAddress = req.body?.minerAddress ?? autoMine.minerAddress;
+  const intervalMs = Number(req.body?.intervalMs ?? autoMine.intervalMs);
+
+  if (enabled && (!minerAddress || typeof minerAddress !== "string" || !minerAddress.startsWith("LYN"))) {
+    return res.status(400).json({ error: "A valid BitLynes miner address is required to enable AutoMine." });
+  }
+
+  if (!Number.isFinite(intervalMs) || intervalMs < 1000 || intervalMs > 60000) {
+    return res.status(400).json({ error: "AutoMine interval must be between 1 and 60 seconds." });
+  }
+
+  autoMine.enabled = enabled;
+  autoMine.minerAddress = minerAddress || null;
+  autoMine.intervalMs = Math.round(intervalMs);
+  autoMine.lastError = null;
+
+  res.json(autoMineStatus());
 });
 
 app.post("/api/wallet", (req, res) => {
@@ -177,10 +259,6 @@ app.post(
       throw new Error("Faucet amount is too large.");
     }
 
-    // Prototype-only faucet: mine an empty block whose reward is the requested
-    // test amount. Pending Lynes remain pending, and the normal mining reward is
-    // restored immediately afterward. The block itself is never altered after
-    // mining, so its proof-of-work hash remains valid.
     const pending = chain.mempool;
     const normalRewardUnits = chain.rewardUnits;
     chain.mempool = [];
@@ -209,8 +287,6 @@ app.get("/api/validate", (req, res) => {
   res.json(chain.validateChain());
 });
 
-// Express 5 / path-to-regexp no longer accepts app.get("*").
-// A plain middleware fallback safely serves the SPA for any non-API GET route.
 app.use((req, res, next) => {
   if (req.method !== "GET") {
     return next();
