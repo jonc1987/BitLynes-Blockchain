@@ -46,6 +46,9 @@ export class BitLynesChain {
       difficulty: 0,
       transactions: [],
       miner: "GENESIS",
+      minerGroupId: "genesis",
+      minerGroupName: "Genesis",
+      rewardUnits: 0,
     };
 
     block.hash = this.hashBlock(block);
@@ -58,7 +61,7 @@ export class BitLynesChain {
   }
 
   lynePayload(lyne) {
-    return {
+    const payload = {
       from: lyne.from,
       to: lyne.to,
       amountUnits: lyne.amountUnits,
@@ -66,15 +69,26 @@ export class BitLynesChain {
       timestamp: lyne.timestamp,
       publicKey: lyne.publicKey,
     };
+
+    if ("minerGroupId" in lyne) payload.minerGroupId = lyne.minerGroupId;
+    if ("feeUnits" in lyne) payload.feeUnits = lyne.feeUnits;
+
+    return payload;
   }
 
   lyneId(payload, signature) {
     return sha256(`${stableStringify(payload)}:${signature}`);
   }
 
-  createLyne({ privateKey, to, amount }) {
+  createLyne({ privateKey, to, amount, minerGroupId, feePercent = 0 }) {
     if (!privateKey || !to) {
       throw new Error("privateKey and recipient address are required.");
+    }
+    if (!minerGroupId || typeof minerGroupId !== "string") {
+      throw new Error("A miner group is required.");
+    }
+    if (!Number.isFinite(feePercent) || feePercent < 0 || feePercent > 25) {
+      throw new Error("Miner fee must be between 0% and 25%.");
     }
 
     const publicKey = publicKeyFromPrivateKey(privateKey);
@@ -85,6 +99,7 @@ export class BitLynesChain {
     }
 
     const amountUnits = toUnits(amount);
+    const feeUnits = Math.ceil(amountUnits * (feePercent / 100));
     const nonce = this.getNextNonce(from);
     const timestamp = Date.now();
 
@@ -95,6 +110,8 @@ export class BitLynesChain {
       nonce,
       timestamp,
       publicKey,
+      minerGroupId,
+      feeUnits,
     };
 
     const signature = signPayload(privateKey, payload);
@@ -103,6 +120,8 @@ export class BitLynesChain {
       id: this.lyneId(payload, signature),
       ...payload,
       amount: fromUnits(amountUnits),
+      fee: fromUnits(feeUnits),
+      total: fromUnits(amountUnits + feeUnits),
       signature,
     };
   }
@@ -123,24 +142,21 @@ export class BitLynesChain {
     }
 
     const required = [
-      "id",
-      "from",
-      "to",
-      "amountUnits",
-      "nonce",
-      "timestamp",
-      "publicKey",
-      "signature",
+      "id", "from", "to", "amountUnits", "nonce",
+      "timestamp", "publicKey", "signature",
     ];
 
     for (const field of required) {
-      if (!(field in lyne)) {
-        throw new Error(`Lyne is missing ${field}.`);
-      }
+      if (!(field in lyne)) throw new Error(`Lyne is missing ${field}.`);
     }
 
     if (!Number.isSafeInteger(lyne.amountUnits) || lyne.amountUnits <= 0) {
       throw new Error("Lyne amount is invalid.");
+    }
+
+    const feeUnits = lyne.feeUnits ?? 0;
+    if (!Number.isSafeInteger(feeUnits) || feeUnits < 0) {
+      throw new Error("Lyne fee is invalid.");
     }
 
     if (!Number.isSafeInteger(lyne.nonce) || lyne.nonce < 1) {
@@ -165,10 +181,7 @@ export class BitLynesChain {
       this.chain.flatMap((block) => block.transactions.map((tx) => tx.id))
     );
 
-    if (knownIds.has(lyne.id)) {
-      throw new Error("Lyne is already confirmed.");
-    }
-
+    if (knownIds.has(lyne.id)) throw new Error("Lyne is already confirmed.");
     if (includeMempool && this.mempool.some((tx) => tx.id === lyne.id)) {
       throw new Error("Lyne is already pending.");
     }
@@ -193,11 +206,8 @@ export class BitLynesChain {
       throw new Error(`Invalid nonce. Expected ${expectedNonce}.`);
     }
 
-    const availableUnits = this.getBalanceUnits(lyne.from, {
-      includeMempool,
-    });
-
-    if (availableUnits < lyne.amountUnits) {
+    const availableUnits = this.getBalanceUnits(lyne.from, { includeMempool });
+    if (availableUnits < lyne.amountUnits + feeUnits) {
       throw new Error(
         `Insufficient balance. Available: ${fromUnits(availableUnits)} LYN.`
       );
@@ -206,32 +216,46 @@ export class BitLynesChain {
     return true;
   }
 
-  minePending(minerAddress) {
+  minePending(minerAddress, { minerGroupId = null, minerGroupName = null } = {}) {
     if (!minerAddress || typeof minerAddress !== "string") {
-      throw new Error("A miner address is required.");
+      throw new Error("A miner payout address is required.");
     }
 
-    const pending = clone(this.mempool);
+    let selected;
+    let remaining;
+
+    if (minerGroupId) {
+      selected = this.mempool.filter((tx) => (tx.minerGroupId ?? "legacy") === minerGroupId);
+      remaining = this.mempool.filter((tx) => (tx.minerGroupId ?? "legacy") !== minerGroupId);
+    } else {
+      selected = clone(this.mempool);
+      remaining = [];
+    }
+
+    const feeUnits = selected.reduce((sum, tx) => sum + (tx.feeUnits ?? 0), 0);
+
     const block = {
       index: this.chain.length,
       timestamp: Date.now(),
       previousHash: this.chain.at(-1).hash,
       nonce: 0,
       difficulty: this.difficulty,
-      transactions: pending,
+      transactions: clone(selected),
       miner: minerAddress,
+      minerGroupId: minerGroupId ?? "manual",
+      minerGroupName: minerGroupName ?? "Manual",
       rewardUnits: this.rewardUnits,
+      feeUnits,
     };
 
     const target = "0".repeat(this.difficulty);
-
     do {
       block.nonce += 1;
       block.hash = this.hashBlock(block);
     } while (!block.hash.startsWith(target));
 
     this.chain.push(block);
-    this.mempool = [];
+    this.mempool = remaining;
     return clone(block);
   }
 
@@ -240,18 +264,20 @@ export class BitLynesChain {
 
     for (const block of this.chain) {
       if (block.index > 0 && block.miner === address) {
-        balance += block.rewardUnits ?? 0;
+        balance += (block.rewardUnits ?? 0) + (block.feeUnits ?? 0);
       }
 
       for (const tx of block.transactions) {
-        if (tx.from === address) balance -= tx.amountUnits;
+        const feeUnits = tx.feeUnits ?? 0;
+        if (tx.from === address) balance -= tx.amountUnits + feeUnits;
         if (tx.to === address) balance += tx.amountUnits;
       }
     }
 
     if (includeMempool) {
       for (const tx of this.mempool) {
-        if (tx.from === address) balance -= tx.amountUnits;
+        const feeUnits = tx.feeUnits ?? 0;
+        if (tx.from === address) balance -= tx.amountUnits + feeUnits;
         if (tx.to === address) balance += tx.amountUnits;
       }
     }
@@ -267,9 +293,7 @@ export class BitLynesChain {
     let highest = 0;
     for (const block of this.chain) {
       for (const tx of block.transactions) {
-        if (tx.from === address) {
-          highest = Math.max(highest, tx.nonce);
-        }
+        if (tx.from === address) highest = Math.max(highest, tx.nonce);
       }
     }
     return highest;
@@ -284,9 +308,7 @@ export class BitLynesChain {
   }
 
   validateChain() {
-    if (this.chain.length === 0) {
-      return { valid: false, error: "Chain is empty." };
-    }
+    if (this.chain.length === 0) return { valid: false, error: "Chain is empty." };
 
     const genesis = this.chain[0];
     if (genesis.hash !== this.hashBlock(genesis)) {
@@ -296,35 +318,28 @@ export class BitLynesChain {
     const balances = new Map();
     const nonces = new Map();
     const ids = new Set();
-
-    const addBalance = (address, delta) => {
+    const addBalance = (address, delta) =>
       balances.set(address, (balances.get(address) ?? 0) + delta);
-    };
 
     for (let i = 1; i < this.chain.length; i += 1) {
       const block = this.chain[i];
       const previous = this.chain[i - 1];
 
-      if (block.index !== i) {
-        return { valid: false, error: `Block ${i} index mismatch.` };
-      }
-
+      if (block.index !== i) return { valid: false, error: `Block ${i} index mismatch.` };
       if (block.previousHash !== previous.hash) {
         return { valid: false, error: `Block ${i} previous hash mismatch.` };
       }
-
       if (block.hash !== this.hashBlock(block)) {
         return { valid: false, error: `Block ${i} hash mismatch.` };
       }
-
       if (!block.hash.startsWith("0".repeat(block.difficulty))) {
         return { valid: false, error: `Block ${i} fails proof of work.` };
       }
 
+      let calculatedFees = 0;
+
       for (const tx of block.transactions) {
-        if (ids.has(tx.id)) {
-          return { valid: false, error: `Duplicate Lyne ${tx.id}.` };
-        }
+        if (ids.has(tx.id)) return { valid: false, error: `Duplicate Lyne ${tx.id}.` };
 
         const payload = this.lynePayload(tx);
         if (
@@ -340,17 +355,24 @@ export class BitLynesChain {
           return { valid: false, error: `Bad nonce in Lyne ${tx.id}.` };
         }
 
-        if ((balances.get(tx.from) ?? 0) < tx.amountUnits) {
+        const feeUnits = tx.feeUnits ?? 0;
+        const spend = tx.amountUnits + feeUnits;
+        if ((balances.get(tx.from) ?? 0) < spend) {
           return { valid: false, error: `Overspend in Lyne ${tx.id}.` };
         }
 
-        addBalance(tx.from, -tx.amountUnits);
+        addBalance(tx.from, -spend);
         addBalance(tx.to, tx.amountUnits);
+        calculatedFees += feeUnits;
         nonces.set(tx.from, tx.nonce);
         ids.add(tx.id);
       }
 
-      addBalance(block.miner, block.rewardUnits ?? 0);
+      if ((block.feeUnits ?? 0) !== calculatedFees) {
+        return { valid: false, error: `Block ${i} fee total mismatch.` };
+      }
+
+      addBalance(block.miner, (block.rewardUnits ?? 0) + calculatedFees);
     }
 
     return { valid: true };
