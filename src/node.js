@@ -104,8 +104,18 @@ app.get("/api/validate", (req, res) => {
   res.json(chain.validateChain());
 });
 
-app.get("*", (req, res) => {
-  res.sendFile(path.join(__dirname, "..", "public", "index.html"));
+// Express 5 / path-to-regexp no longer accepts app.get("*").
+// A plain middleware fallback safely serves the SPA for any non-API GET route.
+app.use((req, res, next) => {
+  if (req.method !== "GET") {
+    return next();
+  }
+
+  if (req.path.startsWith("/api/")) {
+    return res.status(404).json({ error: "BitLynes API route not found." });
+  }
+
+  return res.sendFile(path.join(__dirname, "..", "public", "index.html"));
 });
 
 app.use((error, req, res, next) => {
